@@ -11,8 +11,8 @@
 
 (def separators
   "Map column key to field separator as a regex."
-  {"FORMAT" #";"
-   "INFO"   #":"})
+  {"FORMAT" #":"
+   "INFO"   #";"})
 
 (def vcf
   "From gs://broad-gotc-test-storage/annotation_filtration/"
@@ -153,6 +153,19 @@
                         (remove (fn [line] (= head-line line)))
                         (map (fn [line] (str/split line #"\t"))))]
       (util/make-map version columns variants))))
+
+(defn parse-meta-line
+  "Return [KEY CSV-MAP] from meta LINE parsed by SPEC."
+  [spec line]
+  (letfn [(fieldit [field] (->> field
+                                (s/unform ::field)
+                                (s/conform ::key-value)
+                                ((juxt :key :value))
+                                (mapv (partial apply str))))]
+    (let [{:keys [key csv]} (s/conform spec line)
+          {:keys [head tail]} csv
+          fields (into [head] (map :field tail))]
+      [(apply str key) (into {} (map fieldit fields))])))
 
 (comment
   (parse vcf)
