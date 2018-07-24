@@ -72,13 +72,16 @@
                               :value (s/+ ::not-dq)
                               :dq    ::dq))
     (s/def ::unquoted  (s/+   (complement (set ",\""))))
-    (s/def ::field     (s/+   (s/alt :unquoted   ::unquoted
-                                     :quoted     ::quoted)))
+    (s/def ::field     (s/+   (s/alt :unquoted ::unquoted
+                                     :quoted   ::quoted)))
     (s/def ::commaf    (s/cat :comma (set ",")
                               :field ::field))
     (s/def ::commafs   (s/*   ::commaf))
     (s/def ::csv       (s/cat :head ::field
                               :tail ::commafs))
+    (s/def ::meta-kv   (s/and string? seqit
+                              (s/cat  :hashes ::hashes
+                                      :key-value ::key-value)))
     (s/def ::meta      (s/cat :hashes ::hashes
                               :key    ::key
                               :=      (set "=")
@@ -87,7 +90,7 @@
                               :right  (set ">")))
     (s/def ::<meta>        (s/and string? seqit ::meta))
     (s/def ::contig-line   (meta "contig"))
-    (s/def ::contig-line   (meta "ALT"))
+    (s/def ::alt-line      (meta "ALT"))
     (s/def ::filter-line   (meta "FILTER"))
     (s/def ::format-line   (meta "FORMAT"))
     (s/def ::info-line     (meta "INFO"))
@@ -119,9 +122,8 @@
     (let [[meta-lines lines] (->> vcf
                                   util/inflate-lines
                                   (split-with meta?))
-          [version-line & meta-lines] meta-lines
           [header-lines other-lines] (split-with head? lines)]
-      (util/make-map version-line meta-lines header-lines other-lines))))
+      (util/make-map meta-lines header-lines other-lines))))
 
 (defn validate-lines
   "Throw when LINES are not valid for a VCF file."
@@ -139,7 +141,8 @@
   "Return a map representing the content of VCF file."
   [vcf]
   (let [sections (section vcf)
-        {:keys [version-line meta-lines header-lines other-lines]} sections
+        {:keys [meta-lines header-lines other-lines]} sections
+        version-line (first meta-lines)
         head-line (first header-lines)]
     (validate-lines vcf version-line head-line header-lines)
     (let [version (->> version-line
@@ -156,8 +159,8 @@
                         (map (fn [line] (str/split line #"\t"))))]
       (util/make-map version columns variants))))
 
-(defn parse-meta-line
-  "Return [KEY CSV-MAP] from ::<meta> LINE."
+(defn parse-meta-line-slow
+  "Return [KEY CSV-MAP] from ::<meta> LINE using spec."
   [line]
   (util/dump line)
   (letfn [(fieldit [field] (->> field
@@ -170,7 +173,7 @@
           fields (into [head] (map :field tail))]
       [(apply str key) (into {} (map fieldit fields))])))
 
-(defn map-metas
+(defn map-metas-slow
   "Digest all the :meta-lines in VCF into a nested map."
   [vcf]
   (letfn [(kind [[k vs]] [k (map second vs)])
@@ -180,12 +183,66 @@
     (->> vcf
          section
          :meta-lines
-         (map parse-meta-line)
+         (map parse-meta-line-slow)
          (remove #{["" {"" ""}]})
          (group-by first)
          (map (comp digest kind))
          (into {})
          walk/keywordize-keys)))
+
+(defn parse-hash-hash
+  "Parse a ##ID=CSV or ##ID=<CSV> LINE returning [ID CSV] or nil."
+  [line]
+  (let [[matches? k csv] (re-matches #"^##([^<]+)=<(.*)>$" line)]
+    (if matches? [k csv]
+        (let [[matches? k csv] (re-matches #"^##([^=]+)=(.*)$" line)]
+          (when matches? [k csv])))))
+
+(defn parse-meta
+  "Return nil or LINE parsed into a [ID {CSV}] or [ID VALUE]."
+  [line]
+  (let [string (partial apply str)
+        [id csv] (parse-hash-hash line)]
+    (when id
+      (loop [m {} dq nil k [] eq nil v [] in csv]
+        (if-let [c (first in)]
+          (case c
+            \" (if dq
+                 (recur m nil k eq v (rest in))
+                 (recur m c k eq v (rest in)))
+            \, (if dq
+                 (recur m dq k  eq  (conj v c) (rest in))
+                 (recur (assoc m (string k) (string v)) dq [] nil [] (rest in)))
+            \= (if dq
+                 (if eq
+                   (recur m dq k eq (conj v c) (rest in))
+                   (recur m dq (conj k c) eq v (rest in)))
+                 (recur m dq k c v (rest in)))
+            (if eq
+              (recur m dq k eq (conj v c) (rest in))
+              (recur m dq (conj k c) eq v (rest in))))
+          [id (if (seq v)
+                (assoc m (string k) (string v))
+                (string k))])))))
+
+(defn map-metas
+  "Digest all the :meta-lines in VCF into a nested map."
+  [vcf]
+  (letfn [(fail [s] (throw (new RuntimeException s)))
+          (kind [[k vs]] [k (map second vs)])
+          (id [m] (get m "ID"))
+          (digest [[k vs]]
+            [k (cond
+                 (every? map? vs)    (zipmap (map id vs) vs)
+                 (every? string? vs) (first vs)
+                 :else (fail (str "WTF? " (pr-str [k vs]))))])]
+    (->> vcf
+         section
+         :meta-lines
+         (map parse-meta)
+         (group-by first)
+         (map (comp digest kind))
+         (into {}))))
 
 (comment
   (parse vcf)
@@ -193,53 +250,4 @@
   (conform-lines vcf)
   (time (valid? vcf))
   (map-metas vcf)
-
-  "Not handling these ## meta lines yet."
-  ["##Biotin(Bgnd)=Biotin(Bgnd)|Staining|456|292"
-   "##Biotin(High)=Biotin(High)|Staining|618|4165"
-   "##DNP(Bgnd)=DNP(Bgnd)|Staining|333|266"
-   "##DNP(High)=DNP(High)|Staining|12573|355"
-   "##Extension(A)=Extension(A)|Extension|25349|405"
-   "##Extension(C)=Extension(C)|Extension|1442|8646"
-   "##Extension(G)=Extension(G)|Extension|2205|8950"
-   "##Extension(T)=Extension(T)|Extension|27882|316"
-   "##Hyb(High)=Hyb(High)|Hybridization|2227|8113"
-   "##Hyb(Low)=Hyb(Low)|Hybridization|2031|1856"
-   "##Hyb(Medium)=Hyb(Medium)|Hybridization|517|5068"
-   "##NP(A)=NP(A)|Non-Polymorphic|7725|255"
-   "##NP(C)=NP(C)|Non-Polymorphic|568|4775"
-   "##NP(G)=NP(G)|Non-Polymorphic|563|4047"
-   "##NP(T)=NP(T)|Non-Polymorphic|7892|204"
-   "##NSB(Bgnd)Blue=NSB(Bgnd)Blue|Non-SpecificBinding|371|153"
-   "##NSB(Bgnd)Green=NSB(Bgnd)Green|Non-SpecificBinding|277|149"
-   "##NSB(Bgnd)Purple=NSB(Bgnd)Purple|Non-SpecificBinding|371|161"
-   "##NSB(Bgnd)Red=NSB(Bgnd)Red|Non-SpecificBinding|360|153"
-   "##Restore=Restore|Restoration|228|305"
-   "##String(MM)=String(MM)|Stringency|896|237"
-   "##String(PM)=String(PM)|Stringency|13564|257"
-   "##TargetRemoval=TargetRemoval|TargetRemoval|1156|208"
-   "##analysisVersionNumber=1"
-   "##arrayType=Broad_GWAS_supplemental_15061359_A1"
-   "##autocallDate=05/23/2018 21:15"
-   "##autocallGender=F"
-   "##autocallVersion=2.0.0.137"
-   "##chipWellBarcode=200557070005_R06C01"
-   "##clusterFile=Broad_GWAS_supplemental_15061359_A1.egt"
-   "##content=Broad_GWAS_supplemental_15061359_A1.1.2.extended.csv"
-   "##expectedGender=Female"
-   "##extendedIlluminaManifestVersion=1.2"
-   "##extendedManifestFile=Broad_GWAS_supplemental_15061359_A1.1.2.extended.csv"
-   "##fileDate=Wed May 23 21:21:12 UTC 2018"
-   "##fingerprintGender=Unknown"
-   "##genomeBuild=HG19"
-   "##imagingDate=3/2/2017 4:24:38 PM"
-   "##manifestFile=Broad_GWAS_supplemental_15061359_A1.bpm"
-   "##p95Green=4329"
-   "##p95Red=8992"
-   "##picardVersion=07b46e26eb638116226b10df9f3f653b82b8ea95"
-   "##reference=/cromwell_root/broad-references/hg19/v0/Homo_sapiens_assembly19.fasta"
-   "##sampleAlias=NA12878"
-   "##scannerName=N370"
-   "##source=BPM file"
-   "##zcallThresholds=thresholds.7.txt"
-   "##zcallVersion=1.0.0.0"])
+  )
