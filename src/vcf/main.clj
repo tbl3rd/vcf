@@ -82,35 +82,43 @@
          (map (comp digest kind))
          (into {}))))
 
+(defn make-variant-mapper
+  "A function of LINE using TSV and COLUMNS to return a variant map."
+  [tsv columns]
+  (let [semi  (util/split-on #";")
+        colon (util/split-on #":")
+        k=v   (util/split-on #"=" 2)
+        samples (filter string? columns)
+        defaults (zipmap (filter keyword? columns) (repeat identity))
+        fixed (assoc
+               defaults :FILTER semi :FORMAT colon
+               :INFO (fn [info]
+                       (into {} (for [[k v] (map k=v (semi info))]
+                                  [(keyword k) v]))))
+        parser (apply (partial assoc fixed)
+                      (interleave samples (repeat colon)))]
+    (letfn [(parse [m [k v]] (assoc m k ((parser k) v)))]
+      (fn [line]
+        (let [m (reduce parse {} (zipmap columns (tsv line)))
+              formats (partial zipmap (map keyword (:FORMAT m)))]
+          (map (fn [sample] (-> m (update sample formats) (dissoc :FORMAT)))
+               samples))))))
+
 (defn map-variants
   "Map variant lines from VCF with headers distributed over samples."
   [vcf]
-  (letfn [(split-on [re] (fn [line] (str/split line re)))]
-    (let [tsv      (split-on #"\t")
-          sections (section vcf)
-          header   (-> sections :header-lines first (subs 1) tsv)
-          columns  (map keyword header)
-          samples  (into [:FORMAT] (drop 9 columns))
-          separators (into {:FILTER #";" :INFO #";"}
-                           (map vector samples (repeat #":")))]
-      (letfn [(splitter [m [k re]] (update m k (split-on re)))
-              (make [line] (zipmap (map keyword columns) (tsv line)))
-              (split [m] (reduce splitter m separators))
-              (kv [s] (vec (str/split s #"=" 2)))
-              (mapit [col]
-                (into {} (map (fn [s] (vec (str/split s #"=" 2))) col)))
-              (info [m] (update m :INFO mapit))
-              (form-sample [m s] (-> m
-                                     (update s (partial zipmap (:FORMAT m)))
-                                     (dissoc :FORMAT)))
-              (form [m] (map (partial form-sample m) (rest samples)))]
-        (->> sections :other-lines (mapcat (comp form info split make)))))))
+  (let [tsv (util/split-on #"\t")
+        {:keys [header-lines other-lines]} (section vcf)
+        headers (-> header-lines first (subs 1) tsv)
+        [keywords samples] (split-at 9 headers)
+        columns (concat (map keyword keywords) samples)]
+    (mapcat (make-variant-mapper tsv columns) other-lines)))
 
 (comment
   (section vcf)
   (map-metas vcf)
+  (map-variants vcf)
   (map #(get % "Number") (vals (get (map-metas vcf) "INFO")))
   (map #(get % "Number") (vals (get (map-metas vcf) "FORMAT")))
-  (map-variants vcf)
-  (frequencies (map (fn [v] (get v "CHROM")) (map-variants vcf)))
+  (frequencies (map :CHROM (map-variants vcf)))
   )

@@ -1,7 +1,8 @@
 (ns vcf.util
   "Define various useful things."
   (:require [clojure.java.io :as io]
-            [clojure.pprint :refer [pprint]])
+            [clojure.pprint :refer [pprint]]
+            [clojure.string :as str])
   (:import [java.util.zip GZIPInputStream]))
 
 (defmacro do-or-nil
@@ -33,3 +34,8 @@
       GZIPInputStream.
       io/reader
       line-seq))
+
+(defn split-on
+  "A function to split the string S on RE up to N pieces."
+  ([re]   (fn [s] (str/split s re)))
+  ([re n] (fn [s] (str/split s re n))))
