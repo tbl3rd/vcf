@@ -63,6 +63,28 @@
                 (assoc m (string k) (string v))
                 (string k))])))))
 
+;; Add to parsers as they are discovered.
+;;
+(defn add-a-f-or-i-parser
+  "Add to M a parser for FORMAT and INFO meta values."
+  [{:strs [Number Type] :as m}]
+  (letfn [(->Integer1 [x] (Integer/valueOf x))
+          (->Float1   [x] (Float/valueOf   x))]
+    (let [parser-for {["1" "Integer"] ->Integer1
+                      ["1" "Float"]   ->Float1
+                      ["1" "String"]  identity
+                      ["A" "Integer"] ->Integer1
+                      ["A" "Float"]   ->Float1}]
+      (assoc m :parser (parser-for [Number Type] identity)))))
+
+(defn add-parsers
+  "Augment FORMAT or INFO metas with an appropriate parser."
+  [[meta-key meta-map]]
+  [meta-key (if (#{"FORMAT" "INFO"} meta-key)
+              (letfn [(add [[k m]] [k (add-a-f-or-i-parser m)])]
+                (map add meta-map))
+              meta-map)])
+
 (defn map-metas
   "Digest all the :meta-lines in VCF into a nested map."
   [vcf]
@@ -70,33 +92,31 @@
           (kind [[k vs]] [k (map second vs)])
           (id [m] (get m "ID"))
           (digest [[k vs]]
-            [k (cond
-                 (every? map? vs)    (zipmap (map id vs) vs)
-                 (every? string? vs) (first vs)
-                 :else (fail (str "WTF? " (pr-str [k vs]))))])]
+            [k (cond (every? map? vs)    (zipmap (map id vs) vs)
+                     (every? string? vs) (first vs)
+                     :else (fail (str "WTF? " (pr-str [k vs]))))])]
     (->> vcf
          section
          :meta-lines
          (map parse-meta)
          (group-by first)
-         (map (comp digest kind))
+         (map (comp add-parsers digest kind))
          (into {}))))
 
 (defn make-variant-mapper
   "A function of LINE using TSV and COLUMNS to return a variant map."
   [tsv columns]
-  (let [semi  (util/split-on #";")
-        colon (util/split-on #":")
-        k=v   (util/split-on #"=" 2)
-        samples (filter string? columns)
+  (let [semi     (util/split-on #";")
+        colon    (util/split-on #":")
+        k=v      (util/split-on #"=" 2)
+        samples  (filter string? columns)
         defaults (zipmap (filter keyword? columns) (repeat identity))
-        fixed (assoc
-               defaults :FILTER semi :FORMAT colon
-               :INFO (fn [info]
-                       (into {} (for [[k v] (map k=v (semi info))]
-                                  [(keyword k) v]))))
-        parser (apply (partial assoc fixed)
-                      (interleave samples (repeat colon)))]
+        fixed    (assoc defaults :FILTER semi :FORMAT colon
+                        :INFO (fn [info]
+                                (into {} (for [[k v] (map k=v (semi info))]
+                                           [(keyword k) v]))))
+        parser   (apply (partial assoc fixed)
+                        (interleave samples (repeat colon)))]
     (letfn [(parse [m [k v]] (assoc m k ((parser k) v)))]
       (fn [line]
         (let [m (reduce parse {} (zipmap columns (tsv line)))
@@ -118,7 +138,11 @@
   (section vcf)
   (map-metas vcf)
   (map-variants vcf)
-  (map #(get % "Number") (vals (get (map-metas vcf) "INFO")))
+  (vals (get (map-metas vcf) "INFO"))
+  (distinct (map (fn [m] (select-keys m ["Number" "Type"]))
+                 (vals (get (map-metas vcf) "INFO"))))
   (map #(get % "Number") (vals (get (map-metas vcf) "FORMAT")))
   (frequencies (map :CHROM (map-variants vcf)))
   )
+
+({:a 0 :b 1} :b 2)
