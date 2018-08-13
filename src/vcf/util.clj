@@ -6,11 +6,17 @@
   (:import [java.util.zip GZIPInputStream]))
 
 (defmacro do-or-nil
-  "Value of BODY or nil if it throws."
+  "Value of BODY or nil if it throws with logging."
   [& body]
   `(try (do ~@body)
         (catch Exception x#
           (println x#))))
+
+(defmacro do-or-nil-ignored
+  "Value of BODY or nil if it throws without logging."
+  [& body]
+  `(try (do ~@body)
+        (catch Exception ignored#)))
 
 (defmacro dump
   "Dump [EXPRESSION VALUE] where VALUE is EXPRESSION's value."

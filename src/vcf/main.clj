@@ -4,18 +4,66 @@
             [vcf.util :as util])
   (:gen-class))
 
+(def vcf
+  "From gs://broad-gotc-test-storage/annotation_filtration/"
+  "./inputs/hg19/negative/200557070005_R06C01.vcf.gz")
+
 (def vcf-version
   "Support only these versions of VCF file."
   #{"VCFv4.2" "VCFv4.3"})
 
-(def separators
-  "Map column key to field separator as a regex."
-  {"FORMAT" #":"
-   "INFO"   #";"})
+(def INFO-Number
+  "1.4.2 Information field format"
+  {"A" "a value per alternate allele"
+   "R" "a value per possible allele including the reference"
+   "G" "a value per posssible genotype"
+   "." "number of values varies, is unknown or unbounded"})
 
-(def vcf
-  "From gs://broad-gotc-test-storage/annotation_filtration/"
-  "./inputs/hg19/negative/200557070005_R06C01.vcf.gz")
+(def reserved-INFO-fields
+  "from Table 1"
+  (do
+    [:Field   :Number :Type     :Description]
+    [["AA"        "1" "String"  "Ancestral allele"]
+     ["AC"        "A" "Integer" "Allele count in genotypes for each ALT in listed order"]
+     ["AD"        "R" "Integer" "Total read depth for each allele"]
+     ["ADF"       "R" "Integer" "Read depth for each allele on the forward strand"]
+     ["ADR"       "R" "Integer" "Read depth for each allele on the reverse strand"]
+     ["AF"        "A" "Float"   "Allele frequency for each ALT allele in listed order"]
+     ["AN"        "1" "Integer" "Total number of alleles in called genotypes"]
+     ["BQ"        "1" "Float"   "RMS base quality"]
+     ["CIGAR"     "A" "String"  "How to align an alternate allele to the reference"]
+     ["DB"        "0" "Flag"    "dbSNP membership"]
+     ["DP"        "1" "Integer" "Combined depth across samples"]
+     ["END"       "1" "Integer" "End position for symbolic alleles"]
+     ["H2"        "0" "Flag"    "HapMap2 membership"]
+     ["H3"        "0" "Flag"    "HapMap3 membership"]
+     ["MQ"        "1" "."       "RMS mapping quality"]
+     ["MQ0"       "1" "Integer" "Number of MAPQ == 0 reads"]
+     ["NS"        "1" "Integer" "Number of samples with data"]
+     ["SB"        "4" "Integer" "Strand bias"]
+     ["SOMATIC"   "0" "Flag"    "Somatic mutation for cancer genomics"]
+     ["VALIDATED" "0" "Flag"    "Validated by follow-up experiment"]
+     ["1000G"     "0" "Flag"    "1000 Genomes membership"]]))
+
+(def reserved-genotype-fields
+  "1.6.2 Genotype fields"
+  (do
+    [:Field :Number :Type     :Description]
+    [["AD"      "R" "Integer" "Total read depth for each allele"]
+     ["ADF"     "R" "Integer" "Read depth for each allele on the forward strand"]
+     ["ADR"     "R" "Integer" "Read depth for each allele on the reverse strand"]
+     ["DP"      "1" "Integer" "Combined depth across samples"]
+     ["EC"      "A" "Integer" "Expected alternate allele counts"]
+     ["FT"      "1" "String"  "Filter indicating if this genotype was called"]
+     ["GL"      "G" "Float"   "Genotype likelihoods"]
+     ["GP"      "G" "Float"   "Genotype posterior probabilities"]
+     ["GQ"      "1" "Integer" "Conditional genotype quality"]
+     ["GT"      "1" "String"  "Genotype"]
+     ["HQ"      "2" "Integer" "Haplotype quality"]
+     ["MQ"      "1" "Integer" "RMS mapping quality"]
+     ["PL"      "G" "Integer" "Phred-scaled genotype likelihoods rounded to integer"]
+     ["PQ"      "1" "Integer" "Phasing quality"]
+     ["PS"      "1" "Integer" "Phase set"]]))
 
 (defn section
   "Return a map of the sections of the VCF."
@@ -32,15 +80,15 @@
   "Parse a ##ID=CSV or ##ID=<CSV> LINE returning [ID CSV] or nil."
   [line]
   (let [[matches? k csv] (re-matches #"^##([^<]+)=<(.*)>$" line)]
-    (if matches? [k csv]
+    (if matches? [:<_> k csv]
         (let [[matches? k csv] (re-matches #"^##([^=]+)=(.*)$" line)]
-          (when matches? [k csv])))))
+          (when matches? [:___ k csv])))))
 
 (defn parse-meta
   "Return nil or LINE parsed into a [ID {CSV}] or [ID VALUE]."
   [line]
   (let [string (partial apply str)
-        [id csv] (parse-hash-hash line)]
+        [flag-ignored id csv] (parse-hash-hash line)]
     (when id
       (loop [m {} dq nil k [] eq nil v [] in csv]
         (if-let [c (first in)]
@@ -82,7 +130,7 @@
   [[meta-key meta-map]]
   [meta-key (if (#{"FORMAT" "INFO"} meta-key)
               (letfn [(add [[k m]] [k (add-a-f-or-i-parser m)])]
-                (map add meta-map))
+                (into {} (map add meta-map)))
               meta-map)])
 
 (defn map-metas
@@ -134,15 +182,32 @@
         columns (concat (map keyword keywords) samples)]
     (mapcat (make-variant-mapper tsv columns) other-lines)))
 
+(defn sort-chroms
+  "The strings in CHROMS sorted by convention as integers and more."
+  [chroms]
+  (let [more ["V" "W" "X" "Y" "Z" "M"]
+        more->int (reduce-kv (fn [m k v] (assoc m v (+ k 100000))) {} more)
+        int->more (zipmap (vals more->int) (keys more->int))]
+    (letfn [(->int [s] (or (util/do-or-nil-ignored (Integer/parseInt s))
+                           (more->int s nil)))
+            (int-> [n] (int->more n (str n)))]
+      (->> chroms (map ->int) sort (map int->)))))
+
+(defn count-variants
+  "A sorted table of pairs counting variants per chromosome in VCF."
+  [vcf]
+  (let [counts (frequencies (map :CHROM (map-variants vcf)))
+        sorted (sort-chroms (keys counts))
+        table (into [] (for [chrom sorted] [chrom (counts chrom)]))]
+    (conj table [:TOTAL (apply + (vals counts))])))
+
 (comment
   (section vcf)
   (map-metas vcf)
   (map-variants vcf)
+  (time (count-variants vcf))
   (vals (get (map-metas vcf) "INFO"))
   (distinct (map (fn [m] (select-keys m ["Number" "Type"]))
                  (vals (get (map-metas vcf) "INFO"))))
   (map #(get % "Number") (vals (get (map-metas vcf) "FORMAT")))
-  (frequencies (map :CHROM (map-variants vcf)))
   )
-
-({:a 0 :b 1} :b 2)
