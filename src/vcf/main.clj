@@ -142,14 +142,16 @@
           (digest [[k vs]]
             [k (cond (every? map? vs)    (zipmap (map id vs) vs)
                      (every? string? vs) (first vs)
-                     :else (fail (str "WTF? " (pr-str [k vs]))))])]
-    (->> vcf
-         section
-         :meta-lines
-         (map parse-meta)
-         (group-by first)
-         (map (comp add-parsers digest kind))
-         (into {}))))
+                     :else (fail (str "WTF? " (pr-str [k vs]))))])
+          (contig-id [line]
+            (second (re-find #"^##contig=<ID=([^,]*)," line)))]
+    (let [metas (-> vcf section :meta-lines)
+          mapped (->> metas
+                      (map parse-meta)
+                      (group-by first)
+                      (map (comp add-parsers digest kind))
+                      (into {}))]
+      (assoc mapped :contigs (keep contig-id metas)))))
 
 (defn make-variant-mapper
   "A function of LINE using TSV and COLUMNS to return a variant map."
@@ -182,30 +184,24 @@
         columns (concat (map keyword keywords) samples)]
     (mapcat (make-variant-mapper tsv columns) other-lines)))
 
-(defn sort-chroms
-  "The strings in CHROMS sorted by convention as integers and more."
-  [chroms]
-  (let [more ["V" "W" "X" "Y" "Z" "M"]
-        more->int (reduce-kv (fn [m k v] (assoc m v (+ k 100000))) {} more)
-        int->more (zipmap (vals more->int) (keys more->int))]
-    (letfn [(->int [s] (or (util/do-or-nil-ignored (Integer/parseInt s))
-                           (more->int s nil)))
-            (int-> [n] (int->more n (str n)))]
-      (->> chroms (map ->int) sort (map int->)))))
-
 (defn count-variants
-  "A sorted table of pairs counting variants per chromosome in VCF."
+  "A sorted table of pairs counting variants per contig in VCF."
   [vcf]
-  (let [counts (frequencies (map :CHROM (map-variants vcf)))
-        sorted (sort-chroms (keys counts))
-        table (into [] (for [chrom sorted] [chrom (counts chrom)]))]
+  (let [{:keys [contigs]} (map-metas vcf)
+        counts (frequencies (map :CHROM (map-variants vcf)))
+        chroms (filter (set (keys counts)) contigs)
+        table (mapv (fn [chrom] [chrom (counts chrom)]) chroms)]
     (conj table [:TOTAL (apply + (vals counts))])))
 
 (comment
-  (section vcf)
   (map-metas vcf)
   (map-variants vcf)
   (time (count-variants vcf))
+  (sort (keys (get (map-metas vcf) "contig")))
+  ((get (map-metas vcf) "contig") "MT")
+  ((get (map-metas vcf) "contig") "NC_007605")
+  ((get (map-metas vcf) "contig") "X")
+  ((get (map-metas vcf) "contig") "Y")
   (vals (get (map-metas vcf) "INFO"))
   (distinct (map (fn [m] (select-keys m ["Number" "Type"]))
                  (vals (get (map-metas vcf) "INFO"))))
